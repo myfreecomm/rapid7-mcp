@@ -373,6 +373,23 @@ class LogSearchResults(BaseModel):
     leql: dict | None = None
     logs: list[str] = []
     events: list[LogEntry] = []
+    progress: int = 100
+    links: list[Link] = []
+
+
+class LogSetRef(BaseModel):
+    id: str
+    name: str
+
+
+class LogInfo(BaseModel):
+    id: str
+    name: str
+    logsets: list[LogSetRef] = []
+
+
+class LogList(BaseModel):
+    logs: list[LogInfo] = []
 
 
 # ---------------------------------------------------------------------------

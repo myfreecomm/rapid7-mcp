@@ -1,14 +1,19 @@
 """InsightIDR router — cloud SIEM investigations and log search."""
 
-from fastapi import APIRouter, Depends, Query
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from rapid7_mcp.client import InsightIDRClient, get_idr_client
 from rapid7_mcp.models import (
     IndicatorList,
     Investigation,
     InvestigationList,
+    LogInfo,
+    LogList,
     LogSearchRequest,
     LogSearchResults,
+    LogSetRef,
 )
 
 router = APIRouter()
@@ -63,6 +68,41 @@ async def get_investigation(
     return Investigation(**data)
 
 
+@router.get(
+    "/logs/catalog",
+    response_model=LogList,
+    operation_id="list_logs",
+    summary="List InsightIDR logs (name → ID lookup)",
+    description=(
+        "Returns every log configured in InsightIDR, with its ID and the log sets it belongs to. "
+        "query_logs requires a log ID (UUID), not the friendly name shown in the Rapid7 console — "
+        "use this first to resolve a name (e.g. 'prod-handler-pluggto') to the ID it needs. "
+        "Optionally filter by a case-insensitive substring of the name."
+    ),
+)
+async def list_logs(
+    name_contains: str | None = Query(
+        None, description="Case-insensitive substring to filter log names by"
+    ),
+    client: InsightIDRClient = Depends(get_idr_client),
+) -> LogList:
+    data = await client.get("/log_search/management/logs")
+    logs = [
+        LogInfo(
+            id=log["id"],
+            name=log["name"],
+            logsets=[
+                LogSetRef(id=ls["id"], name=ls["name"]) for ls in log.get("logsets_info", [])
+            ],
+        )
+        for log in data.get("logs", [])
+    ]
+    if name_contains:
+        needle = name_contains.lower()
+        logs = [log for log in logs if needle in log.name.lower()]
+    return LogList(logs=logs)
+
+
 @router.post(
     "/logs",
     response_model=LogSearchResults,
@@ -80,14 +120,40 @@ async def query_logs(
     body: LogSearchRequest,
     client: InsightIDRClient = Depends(get_idr_client),
 ) -> LogSearchResults:
-    payload: dict = {"leql": {"statement": body.query}}
-    if body.from_time:
-        payload["from"] = body.from_time
-    if body.to_time:
-        payload["to"] = body.to_time
-    if body.logs:
-        payload["logs"] = body.logs
+    if not body.logs:
+        raise HTTPException(
+            status_code=400,
+            detail="'logs' (lista de log set IDs) é obrigatório para query_logs.",
+        )
+    to_time = body.to_time or int(time.time() * 1000)
+    from_time = body.from_time or (to_time - 24 * 3600 * 1000)
+    payload: dict = {
+        "leql": {"statement": body.query, "during": {"from": from_time, "to": to_time}},
+        "logs": body.logs,
+    }
     data = await client.post("/log_search/query/logs", body=payload)
+    return LogSearchResults(**data)
+
+
+@router.get(
+    "/logs/query/{query_id:path}",
+    response_model=LogSearchResults,
+    operation_id="poll_log_query",
+    summary="Poll a log search job for more results",
+    description=(
+        "query_logs starts an async search job and its first response usually comes back with "
+        "progress=0 and no events yet, even when there are matches — the job keeps scanning in "
+        "the background. Pass the 'id' from that response here (URL-encode it) to continue "
+        "polling the same job. Keep calling this until 'progress' reaches 100; each call returns "
+        "the events found so far, not just the newest increment — accumulate/dedupe by treating "
+        "the last poll with progress=100 as the full result set."
+    ),
+)
+async def poll_log_query(
+    query_id: str,
+    client: InsightIDRClient = Depends(get_idr_client),
+) -> LogSearchResults:
+    data = await client.get(f"/log_search/query/{query_id}")
     return LogSearchResults(**data)
 
 
