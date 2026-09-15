@@ -1,6 +1,8 @@
 """FastAPI application with MCP mount for Rapid7 InsightVM, InsightIDR, and Metasploit Pro."""
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi_mcp import FastApiMCP
 
 from rapid7_mcp.routers import (
@@ -46,6 +48,24 @@ app.include_router(idr.router, prefix="/idr", tags=["InsightIDR"])
 
 # Metasploit Pro — read-only pentest telemetry
 app.include_router(metasploit.router, prefix="/metasploit", tags=["Metasploit Pro (read-only)"])
+
+@app.exception_handler(httpx.HTTPStatusError)
+async def httpx_status_error_handler(
+    request: Request, exc: httpx.HTTPStatusError
+) -> JSONResponse:
+    """Surface the upstream Rapid7 API's real status/body instead of a generic 500.
+
+    All product clients call ``raise_for_status()`` on the raw httpx response, so
+    upstream errors (401 bad/expired key, 403 missing scope, 404, 429, ...) would
+    otherwise reach the MCP client as an opaque ``500 Internal Server Error``.
+    """
+    upstream = exc.response
+    try:
+        detail = upstream.json()
+    except ValueError:
+        detail = upstream.text
+    return JSONResponse(status_code=upstream.status_code, content={"detail": detail})
+
 
 mcp = FastApiMCP(app)
 mcp.mount_http()  # Streamable HTTP MCP endpoint at /mcp
