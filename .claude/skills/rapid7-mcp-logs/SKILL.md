@@ -7,12 +7,24 @@ description: Sobe o servidor local do rapid7-mcp e faz buscas de log no InsightI
 
 ## Contexto
 
-O MCP `rapid7-mcp` **não é um serviço always-on** — é um servidor HTTP local
-(FastAPI/uvicorn) que precisa ser iniciado manualmente antes de cada sessão.
-O `.claude.json` já tem o servidor registrado como:
+O MCP `rapid7-mcp` é um servidor HTTP local (FastAPI/uvicorn) na **porta
+8000**. Ele sobe sozinho no login do Windows (atalho `Rapid7MCPServer.lnk` na
+pasta Startup → `scripts/start-server-hidden.vbs` → `scripts/start-server.ps1`,
+log em `logs/server.log`), mas **não tem watchdog**: se o processo morrer, só
+volta no próximo login/reboot. O `~/.claude.json` (escopo user) tem:
 
 ```json
-"rapid7-mcp": { "type": "http", "url": "http://localhost:9000/mcp" }
+"rapid7-mcp": { "type": "http", "url": "http://127.0.0.1:8000/mcp" }
+```
+
+Use `127.0.0.1`, **não `localhost`**: o uvicorn escuta só em IPv4
+(`127.0.0.1`), e o Claude Code pode resolver `localhost` para `::1` (IPv6) —
+resultado é `ECONNREFUSED` no `/mcp` mesmo com o servidor no ar e o `curl`
+respondendo. Se a config estiver com `localhost`, corrija com:
+
+```bash
+claude mcp remove rapid7-mcp -s user
+claude mcp add --transport http -s user rapid7-mcp http://127.0.0.1:8000/mcp
 ```
 
 Repo local: `D:\Repos\rapid7-mcp`. É um **fork da Nexaas**
@@ -32,7 +44,7 @@ essas tools se aparecer erro de conexão nelas, é esperado.
 ## 1. Verificar se o servidor já está no ar
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:9000/mcp --max-time 3
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/mcp --max-time 3
 ```
 
 Se der erro de conexão (não retornar `406`), o servidor não está rodando —
@@ -41,12 +53,22 @@ na sessão, pule direto para o passo 3.
 
 ## 2. Subir o servidor
 
+Preferido — sobe desacoplado da sessão (sobrevive ao fim dela), igual ao
+autostart:
+
 ```bash
-cd "D:/Repos/rapid7-mcp" && uv run uvicorn rapid7_mcp.main:app --port 9000
+wscript.exe "D:\\Repos\\rapid7-mcp\\scripts\\start-server-hidden.vbs"
 ```
 
-Rodar em **background** (`run_in_background: true` no Bash tool, ou em um
-terminal separado) — é um processo de vida longa, não retorna.
+Alternativa (só para depurar, vendo o traceback no output) — rodar em
+**background** (`run_in_background: true` no Bash tool). Atenção: um processo
+iniciado assim **morre quando a sessão do Claude Code termina**:
+
+```bash
+cd "D:/Repos/rapid7-mcp" && uv run uvicorn rapid7_mcp.main:app --port 8000
+```
+
+Nunca use outra porta: a config do MCP aponta para a 8000.
 
 Depois de subir, **a sessão atual não reconecta sozinha** se o MCP já tinha
 tentado conectar e falhado no início da sessão. Peça para o usuário rodar
@@ -139,13 +161,14 @@ provided continue ID") — não fique esperando demais entre um poll e outro.
 | Sintoma no MCP                                                                     | Causa real                                                                                                                                        | Onde olhar                                                                                                                                                                         |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ConnectionRefused` ao chamar qualquer tool                                        | Servidor local não está rodando                                                                                                                   | Passo 2                                                                                                                                                                            |
-| Erro genérico "Status code: 500. Response: Internal Server Error" em qualquer tool | O wrapper MCP (`fastapi_mcp`) esconde o erro real — **sempre** reporta 500 genérico, seja qual for a causa de baixo (400, 403, 404, erro de rede) | Reproduza a chamada direto contra o servidor local com `curl` (`http://localhost:9000/<path>`) e leia o traceback no log do processo uvicorn — só assim aparece a causa verdadeira |
+| `/mcp` dá `ECONNREFUSED` mas `curl http://127.0.0.1:8000/mcp` retorna `406`        | Config do MCP com `localhost` resolvendo para `::1` (IPv6); uvicorn só escuta IPv4                                                                | Seção Contexto — trocar URL para `127.0.0.1`                                                                                                                                       |
+| Erro genérico "Status code: 500. Response: Internal Server Error" em qualquer tool | O wrapper MCP (`fastapi_mcp`) esconde o erro real — **sempre** reporta 500 genérico, seja qual for a causa de baixo (400, 403, 404, erro de rede) | Reproduza a chamada direto contra o servidor local com `curl` (`http://127.0.0.1:8000/<path>`) e leia o traceback no log do processo uvicorn — só assim aparece a causa verdadeira |
 | `query_logs` retorna esse 500 genérico                                             | Faltou `logs`, ou a API rejeitou o payload                                                                                                        | Confira se está passando `logs` (UUID) — se sim, teste direto com `curl` no path `/idr/logs`                                                                                       |
 | Nome amigável (ex: `prod-handler-pluggto`) não funciona em `logs`                  | `query_logs` exige UUID, não nome                                                                                                                 | Rode `list_logs` primeiro                                                                                                                                                          |
 | `events` vazio mesmo sabendo que devia ter resultado                               | Job de busca ainda não terminou de processar (assíncrono)                                                                                         | Use `poll_log_query` com o `id` da resposta até `progress: 100`                                                                                                                    |
 
 Técnica geral para depurar qualquer 500 do MCP: bata direto no endpoint REST
-por trás da tool (`curl http://localhost:9000/<prefixo>/<path>`), sem passar
+por trás da tool (`curl http://127.0.0.1:8000/<prefixo>/<path>`), sem passar
 pelo protocolo MCP — o uvicorn loga o traceback completo no console, o que o
 `fastapi_mcp` nunca repassa para o cliente MCP.
 
